@@ -150,8 +150,20 @@ export ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 ### 4.4 rootfs 来源
 
 - `--musl`（默认）：`assets/alpine-rootfs.tar.gz`（仓库内，3.8 MB）
-- `--glibc`（默认）：`assets/glibc-rootfs.tar.gz`（仓库内，6.9 MB，BellSoft Alpaquita）
-- 换别的发行版：`ROOTFS_TGZ=/path/to/ubuntu-base-arm64.tar.gz ./build.sh --glibc`
+- `--glibc`（默认）：`assets/glibc-rootfs.tar.gz`（仓库内，BellSoft Alpaquita）
+- 换别的发行版：`ROOTFS_TGZ=/path/to/rootfs.tar.gz ./build.sh --glibc`
+
+glibc 变体推荐用 Debian（`trixie-slim`）—— 见 §7.2。仓库不内置它，构建时拉取
+（不需要 docker 二进制）：
+
+```bash
+python3 tools/pull-registry-rootfs.py docker.io/library/debian:trixie-slim \
+        -o /tmp/debian-trixie-slim-arm64.tar.gz
+ROOTFS_TGZ=/tmp/debian-trixie-slim-arm64.tar.gz ./build.sh --glibc
+```
+
+`pull-registry-rootfs.py` 也支持 GHCR（`ghcr.io/bell-sw/alpaquita-linux-base:stream-glibc`），
+`--print-digests` 只打印 digest、不下载，便于把版本钉住在构建脚本里。
 
 > 换 rootfs 时 `build.sh` 会用 tarball 的 SHA-256 作戳自动清理 stage；同名但内容不同的
 > 场景不会被混在一起（早前手工清理踩过一次，已修）。
@@ -235,9 +247,29 @@ export ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 
 构建时 `--check` 会校验无残留；`DEBRAND=0` 可跳过（仅供对比原始镜像）。
 
-> **Ubuntu** 是 Canonical Ltd. 的注册商标，**Alpaquita**、BellSoft 是 BellSoft 的商标。
-> 本项目与二者均无关联，也未获其授权或背书；rootfs 里保留的原始包名仅用于指明来源。
+> **Ubuntu** 是 Canonical Ltd. 的注册商标，**Alpaquita**、BellSoft 是 BellSoft 的商标，
+> Debian 的商标归 Software in the Public Interest 所有。
+> 本项目与它们均无关联，也未获其授权或背书；rootfs 里保留的原始包名仅用于指明来源。
 > musl 变体（Alpine）当前**未**做去品牌化，仍是原样标识。
+
+### 7.2 为什么 glibc 变体推荐 Debian 而不是 Ubuntu
+
+两者的**标识文件**都能改干净，差别在改不掉的部分。实测（去品牌化后的统计）：
+
+| | Ubuntu 24.04 base | Debian 13 (trixie-slim) |
+|---|---|---|
+| 文件名含品牌 | 15 | 54 |
+| 但这些是 | `/etc/legal`（质保声明）、`/usr/share/apport`、`ubuntu-keyring`、sysctl.d 注释、`/etc/cloud/build.info`、libsystemd 内嵌串 | 几乎全是 `/usr/share/keyrings/debian-archive-*.gpg`（apt 验签必需）、`terminfo/xterm-debian`、`perl5/Debian`（模块命名空间） |
+| 额外的发行版专属组件 | apport、ubuntu-advantage/Pro、update-manager、`50-motd-news`（联网抓取）、ESM 提示 | 无 |
+
+即：Debian 剩下的全是**功能性**文件（keyring 改不动、perl 命名空间改不动），
+Ubuntu 剩下的则包含会主动展示发行版身份的内容（`/etc/legal`、崩溃上报、
+Pro 订阅提示、联网 motd）。
+
+顺带确认了一个迁移前提：**补丁表在第三个 glibc 版本上仍然成立** ——
+Debian trixie 的 glibc 2.41 与 Ubuntu 2.39、Alpaquita 2.43 的站点
+（libc 里 `set_robust_list`×2、`rseq`/`clone3`/`faccessat2`/`statx` 各 1，
+ld.so 里 `set_robust_list`/`rseq` 各 1）完全一致，`--check` 直接通过。
 
 三代关系（A 桌面版 zroot / B Android 前作 zroot-lab / 本作 pocketroot）都是同一作者的
 作品，A、B 均未公开发布，因此本项目不存在继承自第三方的代码或版权声明。

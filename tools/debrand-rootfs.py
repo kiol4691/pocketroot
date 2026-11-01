@@ -84,7 +84,13 @@ DELETE_GLOBS = [
     "usr/share/applications/*alpaquita*",
 ]
 
-BRANDS = (b"ubuntu", b"alpaquita", b"bellsoft")
+# 被当作"品牌"对待的名字。Debian 也在内：本项目基于 Debian 构建时同样不会
+# 以 Debian 的名字分发（SPI 的商标政策比 Canonical 宽松，但把修改版称作
+# Debian 仍不合适）。
+#
+# 注意 ID_LIKE=debian 是**功能字段**（指明包体系），不是标识，
+# 因此 check() 里对 os-release 的扫描会跳过 ID_LIKE 行。
+BRANDS = (b"ubuntu", b"alpaquita", b"bellsoft", b"debian")
 
 
 def os_release_text(old: dict) -> str:
@@ -103,12 +109,18 @@ def os_release_text(old: dict) -> str:
     lines.append('PRETTY_NAME="%s"' % NEW_PRETTY)
     if "LIBC_TYPE" in old:
         lines.append("LIBC_TYPE=%s" % old["LIBC_TYPE"])
-    # 其余键原样带过去（未知键不丢，避免破坏别的工具）
+    # 其余键原样带过去（未知键不丢，避免破坏别的工具），但**键名含品牌**
+    # 的键一律丢弃：DEBIAN_VERSION_FULL、UBUNTU_CODENAME 之类。
+    # ID_LIKE=debian 不在此列 —— 它是功能字段（指明包体系），不是标识。
     known = {"NAME", "ID", "ID_LIKE", "VERSION", "VERSION_ID",
              "VERSION_CODENAME", "PRETTY_NAME", "LIBC_TYPE"} | DROP_KEYS
     for k, v in old.items():
-        if k not in known:
-            lines.append("%s=%s" % (k, v))
+        if k in known:
+            continue
+        low = k.lower()
+        if any(b.decode() in low for b in BRANDS):
+            continue
+        lines.append("%s=%s" % (k, v))
     return "\n".join(lines) + "\n"
 
 
@@ -287,7 +299,12 @@ def check(rootfs: str) -> int:
         p = os.path.join(rootfs, rel)
         if not os.path.exists(p):
             continue
-        data = open(os.path.realpath(p), "rb").read().lower()
+        text = open(os.path.realpath(p), encoding="utf-8", errors="replace").read()
+        if rel.endswith("os-release"):
+            # ID_LIKE 指明包体系（debian / alpine），属功能字段，不算标识残留
+            text = "\n".join(l for l in text.splitlines()
+                              if not l.strip().startswith("ID_LIKE="))
+        data = text.lower().encode("utf-8", "replace")
         for b in BRANDS:
             if b in data:
                 bad.append("%s 含 %r" % (rel, b.decode()))
