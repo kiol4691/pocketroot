@@ -672,7 +672,14 @@ fork 后在新进程里做的，父进程的缓存只在它自己 exec 前存在
 
 ## 尚未验证
 
-- PyTorch / `rseq` 风险（`docs/heavy-workloads.md`）—— 需先解决 glibc
-  rootfs 的 python3 安装（Alpaquita 源不可达 + guest 无 DNS，需离线闭包）；
-- 打补丁后 `clone3` 走 clone fallback、`rseq` 关闭，**线程密集/长跑**负载未压测；
-- 换 glibc 版本后补丁的 EXPECT 命中数需要重新确认（脚本会硬失败，这是设计意图）。
+> 前两版这里写着"PyTorch / rseq 未实测""线程密集负载未压测"—— 均已完成，
+> 见上文各节。以下是**现在真的没做**的：
+
+- 16KB 页设备（Pixel 16K 开发者模式）；
+- arm64 syscall 号表的自动校验（`_Static_assert` 只在 x86_64 跑）；
+- 换 glibc 版本（2.39 / 2.43 之外）时，补丁 EXPECT 命中数需重新确认 ——
+  脚本会硬失败，这是设计意图；
+- 长跑（小时级）稳定性；线程压测最长只跑到 12800 次建销线程；
+- 只在 CPU 上验证过：GPU / NNAPI 无路径，完整训练任务未跑；
+- `set_robust_list` 被伪装成成功后，健壮互斥量的崩溃恢复**不可用**（已知降级，
+  见压测一节），未做替代方案。

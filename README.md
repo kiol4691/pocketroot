@@ -4,7 +4,8 @@ Android 上的 rootfs 路径重定向 shim（LD_PRELOAD，零 ptrace）。
 
 本项目是同一作者三次重写的第三代：桌面版 **zroot** → Android 前作 **zroot-lab** → 本作。
 目标不是"再写一个能跑的 PoC"，而是**把前两代的设计缺陷逐个消掉**，
-并让核心算法第一次变得可验证。下文用 **A / B** 指代前两代（两者均未公开发布）。
+并让核心算法第一次变得可验证。下文用 **A / B** 指代前两代（两者均未公开发布），
+每一代被判死刑的设计与对应的修正见 [HISTORY.md](HISTORY.md)。
 
 > 内部标识（`ZNG_*` 环境变量、`zng_` 符号前缀、`libzng.so`）沿用第二代的缩写，
 > 与项目名解耦；改名不影响任何对外接口。
@@ -173,10 +174,14 @@ export ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 （gate2）、`env -i` 自净对抗 rc=0 且子进程 `binds=3`（gate3）；
 另有 shebang、写读、PATH exec、`/proc` bind、隔离性、`apk info` 全部 rc=0。
 
-真机共暴露 **8 个 bug**，全部已修复并记录在 `docs/device-verification.md`
+真机共暴露 **16 个 bug**，全部已修复并记录在 `docs/device-verification.md`
 （含"为什么本机单测发现不了"）。其中最严重的是：无条件调用 `openat2` 做能力探测，
 在 App 进程直接触发 SIGSYS —— **adb shell 里完全测不出来**，因为 adb shell
 不是 app 进程、没有那套 seccomp 过滤器。
+
+另有 4 个 bug（第 13–16 条）**只在 Ubuntu 上显形**：Alpaquita 的用户态是 busybox，
+不调 `statx`、不用 fortified `readlink`、`mv` 走 `rename` 而非 `renameat2` ——
+换一个发行版就把这三处全撞出来了。
 
 **仍未验证**
 
@@ -184,15 +189,17 @@ export ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk
   （测试跑在 x86_64）。真机上能跑通，间接说明用到的号都是对的，
   但表中未被实际使用的号仍未经校验。
 - 16KB 页设备（Pixel 16K 开发者模式）。
-- glibc rootfs（PyTorch 场景）：`rseq` 等 syscall 的 seccomp 风险未实测，
-  见 `docs/heavy-workloads.md` 的处置顺序。
-- PyTorch / Docker 镜像：本机无 arm64 设备可长时间占用做完整安装验证。
+- 换 glibc 版本（除 2.39 / 2.43 之外）时，补丁脚本的 EXPECT 命中数需重新确认 ——
+  脚本会硬失败，这是设计意图而非缺陷。
+- 只验证过 CPU 场景；没有 GPU / NNAPI 路径，也没有跑过完整的训练任务。
 
 ## 6. 已知限制
 
-- **v1 不支持静态二进制**：遇到无 `PT_INTERP` 的 ELF 返回 `-ENOSYS` 并记日志，
-  而不是像 A 那样猜测 host native。需要静态支持时，路线是引入 ptrace 兜底
-  （但那是 A 里风险最高的 900 行，且 Android 上还受 SELinux 约束，建议先不做）。
+- **静态二进制可运行，但不经过 shim**：无 `PT_INTERP` 的 ELF 由内核直接加载，
+  子进程因此**不做路径翻译**（`zng.log` 会记 `exec: static binary (child not shimmed)`）。
+  压测程序 `zthreads` 的 musl 版就是静态的，它照样跑在 App 进程里、继承同一套
+  seccomp，只是文件访问不翻译。要让它进 rootfs 视图，目前只能改成动态链接。
+  不引入 ptrace 兜底：那是 A 里风险最高的 900 行，Android 上还受 SELinux 约束。
 - **转发层已覆盖**：`fopen`/`freopen`/`opendir`、`realpath`/`canonicalize_file_name`/
   `get_current_dir_name`、`mkstemp` 家族（含 `mkostemps`）、`scandir`/`scandirat`、
   `glob`/`glob64`、`popen`/`pclose`/`system`、`posix_spawn`（含 `file_actions` 路径翻译）、
