@@ -175,6 +175,28 @@ ROOTFS_TGZ=/tmp/debian-trixie-slim-arm64.tar.gz ./build.sh --glibc
 > 换 rootfs 时 `build.sh` 会用 tarball 的 SHA-256 作戳自动清理 stage；同名但内容不同的
 > 场景不会被混在一起（早前手工清理踩过一次，已修）。
 
+### 4.5 给 rootfs 补装 deb 与 Python 包
+
+slim 镜像刻意裁掉了不少东西，其中 `libgomp1` 是 PyTorch CPU 后端的硬依赖。
+装这些**不需要执行任何 arm64 代码**：deb 用 `dpkg-deb -x` 解包，wheel 本身就是个 zip，
+所以在宿主机上直接完成。
+
+```bash
+# 补装 arm64 deb（默认：libgomp1 libatomic1 procps curl ca-certificates less file tzdata）
+python3 tools/add-debs.py /tmp/rootfs --suite trixie
+
+# 离线装 Python 包（按 cp313 + aarch64 挑选，解压进 site-packages，并对 .so 做架构自检）
+python3 tools/add-wheels.py /tmp/rootfs --py 3.13 --arch aarch64 \
+        --pkgs numpy,pandas,scipy,matplotlib,scikit-learn,pillow,requests
+
+# 然后照常打包
+tar -czf /tmp/rootfs.tar.gz -C /tmp/rootfs .
+ROOTFS_TGZ=/tmp/rootfs.tar.gz ./build.sh --glibc
+```
+
+两个脚本都会把清单写进 rootfs（`/etc/pocketroot-debs.json`、`/etc/pocketroot-wheels.json`），
+含包名、版本与 sha256。
+
 ## 5. 验证状态（诚实版）
 
 **已验证**

@@ -39,10 +39,21 @@ GNU libc（**LGPL-2.1**）与 BusyBox（**GPL-2.0**）等。
 这类镜像由大量 GPL/LGPL 组件构成，分发时同样适用各自的源码提供义务。
 仓库**不包含**此类镜像。
 
-## 运行期依赖（不随本项目分发）
+## 随 rootfs 一起分发的 Python 包
 
-使用者自行安装的 Python 包（numpy / torch / pandas / matplotlib …）遵循各自许可，
-本项目既不分发也不重新授权它们。
+由 `tools/add-wheels.py` 装进 rootfs（各自遵循原许可，本项目不重新授权）：
+
+| 包 | 许可 |
+|---|---|
+| numpy、scipy、pandas | BSD-3-Clause |
+| scikit-learn | BSD-3-Clause |
+| matplotlib | matplotlib (PSF-based) |
+| pillow | HPND |
+| requests | Apache-2.0 |
+| contourpy、kiwisolver、fonttools、joblib、threadpoolctl、packaging 等 | 各自许可（见 wheel 内 LICENSE） |
+
+清单（含版本与 sha256）写在 rootfs 的 `/etc/pocketroot-wheels.json`。
+若你把包换掉或增删，请同步更新这一节。
 
 ## 商标
 
