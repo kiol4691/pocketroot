@@ -22,12 +22,13 @@ usage() {
   --musl    构建 Alpine (musl) 变体（默认）
   --glibc   构建 Alpaquita (glibc) 变体
 
-两者只差三处：打包的 rootfs 资产、构建期 musl 补丁（glibc 不需要）、输出文件名。
+两者只差三处：打包的 rootfs 资产、构建期 seccomp 补丁（各自一套）、输出文件名。
+glibc 变体额外做一次**去品牌化**（见 tools/debrand-rootfs.py），musl 变体不做。
 shim 与 Java 代码完全相同 —— 风味在运行时按「assets 里是哪个 tarball /
 rootfs 里是哪个 ld.so」自动识别，不需要生成 BuildConfig。
 
 环境变量覆盖：ANDROID_HOME / JAVA_HOME / BT / PLAT / ZIG / ECJ /
-              ROOTFS_TGZ / KS / VER
+              ROOTFS_TGZ / KS / VER / DEBRAND
 EOF
 }
 
@@ -99,7 +100,12 @@ echo "  PLAT=$PLAT  BT=$BT  ZIG=$ZIG"
 
 # 刻意不做 `rm -rf "$OUT/stage"`：rootfs 有 500+ 文件，整目录删除会触发
 # 批量删除保护。采用覆盖式解压；需要彻底重建时手动删除 out/stage。
-mkdir -p "$STAGE/assets" "$OUT/classes"
+mkdir -p "$STAGE/assets"
+# classes 必须每次清空：d8 会把目录下所有 .class 一起打包，
+# 改包名后残留的 com/zroot/ng/MainActivity.class 就一直躺在 dex 里
+# （实测：改名后 APK 里仍有旧包名的类与旧文案）。
+rm -rf "$OUT/classes"
+mkdir -p "$OUT/classes"
 
 echo "== [2/8] 交叉编译 shim (aarch64-linux-musl) =="
 # -nostdlib -ffreestanding：shim 不链接任何 libc，
@@ -165,6 +171,18 @@ tar -xzf "$ROOTFS_TGZ" -C "$STAGE/rootfs"
 #     （zroot-lab 0.1.1 的故障，当时 306 个链接全部失效）。
 #     这里改成相对路径，使 rootfs 位置无关。
 python3 "$BASE/tools/rewrite-symlinks.py" "$STAGE/rootfs" | sed 's/^/  /'
+
+# (a2) 去品牌化：分发的 glibc rootfs 是**修改版**（打了 seccomp 补丁），
+#      不能顶着发行版原名出去 —— Ubuntu 是 Canonical 的注册商标、
+#      Alpaquita 是 BellSoft 的商标。把 os-release / issue / motd 换成
+#      本项目名字，删掉 logo 与 motd 广告脚本；包数据库、apt 源、
+#      /usr/share/doc 下的版权声明一律保留（功能与合规所需）。
+#      DEBRAND=0 可跳过（只用于对比原始镜像，不要用于发布）。
+if [ "$FLAVOR" = glibc ] && [ "${DEBRAND:-1}" != 0 ]; then
+    python3 "$BASE/tools/debrand-rootfs.py" "$STAGE/rootfs" \
+        --manifest="$STAGE/assets/debrand-manifest.json" | sed 's/^/  /'
+    python3 "$BASE/tools/debrand-rootfs.py" "$STAGE/rootfs" --check | sed 's/^/  /'
+fi
 
 # (b) musl seccomp 补丁：构建期打一次并生成清单；命中数不为 1 会在此处
 #     非零退出，不会把"补丁没生效"的 rootfs 带进 APK。
@@ -238,7 +256,7 @@ echo "== [8/8] 签名 =="
 if [ ! -f "$KS" ]; then
     keytool -genkeypair -keystore "$KS" -alias zng -keyalg RSA -keysize 2048 \
         -validity 10000 -storepass znglab -keypass znglab \
-        -dname "CN=pocketroot, OU=zroot, O=zroot, L=Shanghai, C=CN"
+        -dname "CN=pocketroot, OU=pocketroot, O=pocketroot, C=CN"
 fi
 "$BT/apksigner" sign --ks "$KS" --ks-key-alias zng \
     --ks-pass pass:znglab --key-pass pass:znglab \

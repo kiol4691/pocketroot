@@ -214,10 +214,30 @@ export ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk
   本就正确）；仅当"dirfd 指向 rootfs 内且路径含需重定向的绝对符号链接"时才需介入。
 - `rename`/`link` 两端跨 bind 时内核会正确报 `EXDEV`，不做跨设备模拟。
 
-## 7. 许可
+## 7. 许可与商标
 
 本项目（代码 + 文档）以 **MIT** 授权，见 [LICENSE](LICENSE)。
 每个源文件头部有 `SPDX-License-Identifier: MIT`。
+
+### 7.1 去品牌化
+
+分发的 glibc rootfs 是**修改版**（打了 seccomp 补丁），因此构建时会把
+发行版**标识性内容**换成 `pocketroot base`（`tools/debrand-rootfs.py`）：
+
+- 改写 `/etc/os-release`、`/etc/issue{,.net}`、`/etc/motd`、`/etc/lsb-release`、
+  `/etc/dpkg/origins/default`；
+- 删除 `/etc/<发行版>-release`、`/etc/update-motd.d/*`（欢迎语与广告，其中
+  `50-motd-news` 还会联网）、`/usr/share/{pixmaps,backgrounds,icons,plymouth}`
+  下的发行版 logo；
+- **保留**：包数据库、`/etc/apt/**`（含源与 keyring）、`/usr/share/doc/**` 下的
+  版权与许可声明。`dpkg -l` 里仍会看到 `ubuntu-keyring` 之类的包名 —— 那是指名性
+  使用，功能与合规所必需。
+
+构建时 `--check` 会校验无残留；`DEBRAND=0` 可跳过（仅供对比原始镜像）。
+
+> **Ubuntu** 是 Canonical Ltd. 的注册商标，**Alpaquita**、BellSoft 是 BellSoft 的商标。
+> 本项目与二者均无关联，也未获其授权或背书；rootfs 里保留的原始包名仅用于指明来源。
+> musl 变体（Alpine）当前**未**做去品牌化，仍是原样标识。
 
 三代关系（A 桌面版 zroot / B Android 前作 zroot-lab / 本作 pocketroot）都是同一作者的
 作品，A、B 均未公开发布，因此本项目不存在继承自第三方的代码或版权声明。

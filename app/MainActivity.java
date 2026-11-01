@@ -498,13 +498,14 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * rootfs 的发行版名（只用于 UI/提示文案）。按内容判断，不写死：
-     * Debian 系把运行时库放在 multiarch 子目录里，busybox 系没有这个目录。
+     * UI/提示文案用的名字。
+     *
+     * 这里刻意**不写发行版名**：分发的 glibc rootfs 是修改版（打了 seccomp
+     * 补丁并去掉了发行版标识），顶着 Ubuntu / Alpaquita 的名字出去容易被
+     * 当成官方产物。原始发行版与版本只在构建日志和 docs 里记录。
      */
     private String distroName() {
-        if (new File(rootfs, "usr/lib/aarch64-linux-gnu").isDirectory())
-            return "Debian/Ubuntu (glibc)";
-        return rootfsAsset().equals(ASSET_GLIBC) ? "Alpaquita (glibc)" : "Alpine (musl)";
+        return "pocketroot base (" + (isGlibc() ? "glibc" : "musl") + ")";
     }
 
     /** APK 里实际打包的 rootfs 资源名。 */

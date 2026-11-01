@@ -18,6 +18,12 @@ bash(GPL-3.0) 等 GNU 程序 —— 对这类二进制再分发，需要能够�
 两个脚本都是**确定性变换**：给定同样的输入 libc，输出的 SHA-256 固定，并写入
 `assets/patch-manifest.json` 供 APK 内校验。
 
+除 libc 外，rootfs 还被做了**去品牌化**（`tools/debrand-rootfs.py`）：改写
+`/etc/os-release`、`/etc/issue`、`/etc/motd` 等标识文件，删除发行版 logo 与
+motd 脚本，标识改为 `pocketroot base`。这一步同样由仓库内脚本完成，可复现；
+清单写入 `assets/debrand-manifest.json`。**包数据库、软件源、keyring、
+`/usr/share/doc` 下的版权声明不在修改范围内** —— 那是合规要求保留的部分。
+
 ## 二、修改的"源码"
 
 对二进制补丁而言，"对应的源码"由两部分组成：

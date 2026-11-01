@@ -44,6 +44,24 @@ GNU libc（**LGPL-2.1**）与 BusyBox（**GPL-2.0**）等。
 使用者自行安装的 Python 包（numpy / torch / pandas / matplotlib …）遵循各自许可，
 本项目既不分发也不重新授权它们。
 
+## 商标
+
+本项目名称 `pocketroot` 与本文档无关的下列名称归各自权利人所有，本项目**不使用**它们
+作为自身标识，也不声称与其存在隶属或背书关系：
+
+| 名称 | 权利人 | 在本项目中的用法 |
+|---|---|---|
+| Ubuntu | Canonical Ltd. | 仅指明 glibc rootfs 的原始来源 |
+| Alpaquita、BellSoft | BellSoft | 同上 |
+| Alpine Linux | Alpine Linux 开发团队 | musl 变体 rootfs 的来源 |
+| Debian | Software in the Public Interest | 指明包体系（dpkg/apt） |
+| PyTorch、NumPy 等 | 各自基金会/公司 | 用户自行安装的运行期依赖 |
+
+为避免修改版被误认为官方产物，**分发的 glibc rootfs 已去品牌化**
+（`tools/debrand-rootfs.py`）：发行版名称、logo、motd 欢迎语与广告脚本均被替换或
+删除，标识改为 `pocketroot base`。包数据库、软件源、keyring、`/usr/share/doc`
+下的版权声明**未改动** —— 其中出现的原始名称属于指名性使用。
+
 ## 文档中的实证数据
 
 `docs/` 下的验证记录由本项目作者实测得到，随代码一同以 MIT 授权；引用时请保留出处。
