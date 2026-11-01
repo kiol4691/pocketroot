@@ -1,8 +1,22 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """
-构建期去品牌化（glibc 变体）
-============================
+构建期处理 rootfs 的发行版身份
+==============================
+
+两种模式
+--------
+
+debrand（默认，用于 Alpaquita / Ubuntu 等）
+    把标识换成 pocketroot base，删掉 logo 与 motd 广告脚本。
+
+mark（用于 Debian）
+    保留发行版名称与版本，只**明确告知这是修改版**：加 VARIANT / VARIANT_ID，
+    在 issue、motd 追加声明，并写出 /etc/pocketroot-build.json 与
+    /usr/share/doc/pocketroot/README.md（基准镜像、改了什么、如何复现）。
+    理由：Debian 的商标政策允许「基于 Debian」的表述，而它的落地痕迹
+    （keyring、terminfo、perl 命名空间）全是功能件 —— 删了系统就坏，
+    保留它们也不构成「声称是官方产物」。
 
 为什么需要
 ----------
@@ -33,12 +47,13 @@ motd 广告脚本。同时有一条硬约束：
 
 用法
 ----
-    python3 tools/debrand-rootfs.py ROOTFS [--check] [--manifest out.json]
+    python3 tools/rootfs-identity.py ROOTFS [--mode debrand|mark] \\
+            [--check] [--manifest out.json]
 
 退出码
 ------
-    0  成功（或 --check 未发现残留）
-    1  --check 发现残留 / 目标缺失
+    0  成功（或 --check 未发现问题）
+    1  --check 发现问题 / 目标缺失
     2  参数错误
 """
 
@@ -53,6 +68,14 @@ NEW_NAME = "pocketroot base"
 NEW_ID = "pocketroot"
 NEW_PRETTY = "pocketroot base (glibc)"
 NEW_ORIGIN = "pocketroot"
+
+# mark 模式用：追加到 os-release 的字段，与写在文件里的告知
+VARIANT_ID = "pocketroot"
+VARIANT = "pocketroot build (unofficial, modified rootfs)"
+DISCLOSURE = ("This is a MODIFIED rootfs built by the pocketroot project.",
+              "It is NOT an official image of the base distribution.")
+BUILD_JSON = "etc/pocketroot-build.json"
+BUILD_DOC = "usr/share/doc/pocketroot/README.md"
 
 # os-release 里要删掉的键：品牌 URL、logo 引用、发行版专属 codename 键
 DROP_KEYS = {
@@ -162,6 +185,22 @@ def write_text(path: str, text: str, report) -> bool:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
+    report["rewritten"].append(os.path.relpath(path, report["_root"]))
+    return True
+
+
+def append_line(path: str, line: str, report) -> bool:
+    """mark 模式用：在已有内容后追加告知（不破坏原有欢迎语）。"""
+    if os.path.exists(path):
+        cur = open(path, encoding="utf-8", errors="replace").read()
+        if "pocketroot" in cur:
+            return False
+        text = cur.rstrip("\n") + "\n" + line + "\n"
+    else:
+        text = line + "\n"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
     report["rewritten"].append(os.path.relpath(path, report["_root"]))
     return True
 
@@ -287,7 +326,121 @@ def debrand(rootfs: str, check_only: bool, manifest: str) -> int:
     return 0
 
 
-def check(rootfs: str) -> int:
+def osrelease_path(rootfs: str) -> str:
+    for rel in ("usr/lib/os-release", "etc/os-release"):
+        p = os.path.join(rootfs, rel)
+        if os.path.exists(p):
+            return os.path.realpath(p)
+    return ""
+
+
+def do_mark(rootfs: str, manifest: str) -> int:
+    """保留发行版身份，只追加「这是修改版」的告知。"""
+    report = {"_root": rootfs, "rewritten": [], "deleted": []}
+    p = osrelease_path(rootfs)
+    if not p:
+        print("[FAIL] 找不到 os-release，rootfs 不完整？")
+        return 1
+    cur = open(p, encoding="utf-8", errors="replace").read()
+    base = parse_kv(cur)
+    if "VARIANT_ID=" not in cur:
+        extra = ["",
+                 "# pocketroot: 本 rootfs 是修改版，非基准发行版的官方镜像",
+                 "VARIANT_ID=" + VARIANT_ID,
+                 'VARIANT="%s"' % VARIANT,
+                 "POCKETROOT_MODIFIED=1",
+                 "POCKETROOT_BUILD_INFO=/" + BUILD_JSON]
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(cur.rstrip("\n") + "\n" + "\n".join(extra) + "\n")
+        report["rewritten"].append(os.path.relpath(p, rootfs))
+
+    line = DISCLOSURE[0] + " " + DISCLOSURE[1]
+    for rel in ("etc/issue", "etc/issue.net", "etc/motd"):
+        append_line(os.path.join(rootfs, rel), line, report)
+
+    info = {
+        "base_distribution": {
+            "id": base.get("ID", "").strip('"'),
+            "name": base.get("NAME", "").strip('"'),
+            "version_id": base.get("VERSION_ID", "").strip('"'),
+            "codename": base.get("VERSION_CODENAME", "").strip('"'),
+        },
+        "built_by": "pocketroot (https://github.com/kiol4691/pocketroot)",
+        "mode": "mark",
+        "modifications": [
+            "glibc 与 ld.so 的 seccomp 指令补丁（tools/patch-glibc-syscalls.py）",
+            "符号链接改写（tools/rewrite-symlinks.py）",
+            "追加修改版告知（本文件）",
+        ],
+        "trademark": ("基准发行版的名称与商标归各自权利人所有；本镜像为修改版，",
+                      "与权利人无关，也未获其授权或背书。"),
+        "reproduce": "ROOTFS_TGZ=<base image tarball> ./build.sh --glibc",
+    }
+    write_text(os.path.join(rootfs, BUILD_JSON),
+               json.dumps(info, indent=2, ensure_ascii=False) + "\n", report)
+
+    doclines = [
+        "pocketroot - modified rootfs",
+        "============================",
+        "",
+        "本 rootfs 由 pocketroot 项目基于 " + base.get("NAME", "?").strip('"') + " 构建，并做了以下修改",
+        "（详见 /" + BUILD_JSON + "）：",
+        "",
+        "- glibc 与 ld.so 的 seccomp 指令补丁（使其能在 Android app 的 seccomp 白名单下运行）",
+        "- 绝对符号链接改写为相对（防止解析逃出 rootfs）",
+        "- 追加修改版告知（os-release 的 VARIANT / VARIANT_ID，issue 与 motd 的告知行）",
+        "",
+        "它是修改版，不是基准发行版的官方镜像。基准发行版的名称与商标归各自权利人所有；",
+        "本项目与其权利人无关，也未获其授权或背书。",
+        "",
+        "pocketroot 自身的代码以 MIT 授权：https://github.com/kiol4691/pocketroot",
+        "",
+    ]
+    write_text(os.path.join(rootfs, BUILD_DOC), "\n".join(doclines), report)
+
+    print("[ok]   rootfs 身份处理（mark）：改写 %d" % len(report["rewritten"]))
+    for r in report["rewritten"]:
+        print("         改  " + r)
+    if manifest:
+        state = collect_state(rootfs)
+        state["mode"] = "mark"
+        state["changed_this_run"] = {"rewritten": report["rewritten"],
+                                     "deleted": report["deleted"]}
+        with open(manifest, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2, ensure_ascii=False)
+        print("[ok]   清单已写出: " + manifest)
+    return 0
+
+
+def check(rootfs: str, mode: str) -> int:
+    """校验身份处理的结果。只扫「我们负责的文件」，避免把 apt 源、证书、
+    /usr/share/doc 里的指名性引用误判成残留。"""
+    if mode == "mark":
+        bad = []
+        p = osrelease_path(rootfs)
+        ident = parse_kv(open(p, encoding="utf-8", errors="replace").read()) if p else {}
+        if ident.get("VARIANT_ID") != VARIANT_ID:
+            bad.append("os-release 缺少 VARIANT_ID=%s" % VARIANT_ID)
+        if ident.get("POCKETROOT_MODIFIED") != "1":
+            bad.append("os-release 缺少 POCKETROOT_MODIFIED=1")
+        for rel in ("etc/issue", "etc/motd"):
+            q = os.path.join(rootfs, rel)
+            if not os.path.exists(q):
+                bad.append(rel + " 不存在")
+            elif "pocketroot" not in open(q, encoding="utf-8", errors="replace").read():
+                bad.append(rel + " 缺少修改版告知")
+        for rel in (BUILD_JSON, BUILD_DOC):
+            if not os.path.exists(os.path.join(rootfs, rel)):
+                bad.append(rel + " 不存在")
+        if bad:
+            print("[FAIL] 修改版告知不完整（%d 项）：" % len(bad))
+            for b in bad[:10]:
+                print("         " + b)
+            return 1
+        print("[ok]   修改版告知校验通过（mode=mark）")
+        return 0
+
+    bad = []
     """确认没有品牌残留。只扫「我们负责的文件」，避免把 apt 源、证书、
     /usr/share/doc 里的指名性引用误判成残留。"""
     bad = []
@@ -336,10 +489,20 @@ def main() -> int:
     if not os.path.isdir(rootfs):
         print("[FAIL] rootfs 目录不存在: " + rootfs)
         return 1
+    mode = "debrand"
     manifest = ""
     for f in flags:
-        if f.startswith("--manifest="):
+        if f.startswith("--mode="):
+            mode = f.split("=", 1)[1]
+        elif f.startswith("--manifest="):
             manifest = f.split("=", 1)[1]
+    if mode not in ("debrand", "mark"):
+        print("[FAIL] --mode 只支持 debrand / mark")
+        return 2
+    if "--check" in flags:
+        return check(rootfs, mode)
+    if mode == "mark":
+        return do_mark(rootfs, manifest)
     return debrand(rootfs, "--check" in flags, manifest)
 
 

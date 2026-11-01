@@ -153,8 +153,15 @@ export ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 - `--glibc`（默认）：`assets/glibc-rootfs.tar.gz`（仓库内，BellSoft Alpaquita）
 - 换别的发行版：`ROOTFS_TGZ=/path/to/rootfs.tar.gz ./build.sh --glibc`
 
-glibc 变体推荐用 Debian（`trixie-slim`）—— 见 §7.2。仓库不内置它，构建时拉取
-（不需要 docker 二进制）：
+glibc 变体推荐用 **Debian**（`trixie-slim`，或带 Python 的 `python:3.13-slim`）——
+见 §7.2。仓库不内置它，构建时拉取（不需要 docker 二进制）：
+
+```bash
+# 带 Python 3.13 + pip 的 Debian 13（解包后约 148 MB，APK 约 43 MB）
+python3 tools/pull-registry-rootfs.py docker.io/library/python:3.13-slim \
+        -o /tmp/py313-slim-arm64.tar.gz
+ROOTFS_TGZ=/tmp/py313-slim-arm64.tar.gz ./build.sh --glibc
+```
 
 ```bash
 python3 tools/pull-registry-rootfs.py docker.io/library/debian:trixie-slim \
@@ -231,21 +238,22 @@ ROOTFS_TGZ=/tmp/debian-trixie-slim-arm64.tar.gz ./build.sh --glibc
 本项目（代码 + 文档）以 **MIT** 授权，见 [LICENSE](LICENSE)。
 每个源文件头部有 `SPDX-License-Identifier: MIT`。
 
-### 7.1 去品牌化
+### 7.1 发行版身份处理（两种模式）
 
-分发的 glibc rootfs 是**修改版**（打了 seccomp 补丁），因此构建时会把
-发行版**标识性内容**换成 `pocketroot base`（`tools/debrand-rootfs.py`）：
+分发的 glibc rootfs 是**修改版**（打了 seccomp 补丁）。构建时按基准发行版自动选模式
+（`tools/rootfs-identity.py`）：
 
-- 改写 `/etc/os-release`、`/etc/issue{,.net}`、`/etc/motd`、`/etc/lsb-release`、
-  `/etc/dpkg/origins/default`；
-- 删除 `/etc/<发行版>-release`、`/etc/update-motd.d/*`（欢迎语与广告，其中
-  `50-motd-news` 还会联网）、`/usr/share/{pixmaps,backgrounds,icons,plymouth}`
-  下的发行版 logo；
-- **保留**：包数据库、`/etc/apt/**`（含源与 keyring）、`/usr/share/doc/**` 下的
-  版权与许可声明。`dpkg -l` 里仍会看到 `ubuntu-keyring` 之类的包名 —— 那是指名性
-  使用，功能与合规所必需。
+| 模式 | 适用 | 做法 |
+|---|---|---|
+| **mark** | Debian | **保留**发行版名称与版本，只明确告知是修改版：os-release 加 `VARIANT_ID=pocketroot`、`POCKETROOT_MODIFIED=1`，issue / motd 追加告知，并写出 `/etc/pocketroot-build.json` 与 `/usr/share/doc/pocketroot/README.md`（基准镜像、改了什么、如何复现） |
+| **debrand** | Alpaquita / Ubuntu 等 | 把标识换成 `pocketroot base`：改写 os-release、issue、motd、lsb-release、dpkg origins；删除 logo、`/etc/<发行版>-release`、`/etc/update-motd.d/*`（其中 `50-motd-news` 还会联网） |
 
-构建时 `--check` 会校验无残留；`DEBRAND=0` 可跳过（仅供对比原始镜像）。
+两种模式都**保留**：包数据库、`/etc/apt/**`（源与 keyring）、`/usr/share/doc/**` 下的
+版权与许可声明。`dpkg -l` 里仍会看到 `ubuntu-keyring` 之类的包名 —— 那是指名性使用，
+功能与合规所必需。
+
+`--check` 会校验结果；`DEBRAND=0` 跳过（仅供对比原始镜像）；`IDENTITY=debrand|mark|none`
+可强制指定模式。
 
 > **Ubuntu** 是 Canonical Ltd. 的注册商标，**Alpaquita**、BellSoft 是 BellSoft 的商标，
 > Debian 的商标归 Software in the Public Interest 所有。

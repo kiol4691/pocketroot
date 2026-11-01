@@ -23,7 +23,7 @@ usage() {
   --glibc   构建 Alpaquita (glibc) 变体
 
 两者只差三处：打包的 rootfs 资产、构建期 seccomp 补丁（各自一套）、输出文件名。
-glibc 变体额外做一次**去品牌化**（见 tools/debrand-rootfs.py），musl 变体不做。
+glibc 变体额外处理发行版身份（见 tools/rootfs-identity.py）：Debian 只加修改版告知，其余整体去品牌化；musl 变体不做。
 shim 与 Java 代码完全相同 —— 风味在运行时按「assets 里是哪个 tarball /
 rootfs 里是哪个 ld.so」自动识别，不需要生成 BuildConfig。
 
@@ -172,16 +172,30 @@ tar -xzf "$ROOTFS_TGZ" -C "$STAGE/rootfs"
 #     这里改成相对路径，使 rootfs 位置无关。
 python3 "$BASE/tools/rewrite-symlinks.py" "$STAGE/rootfs" | sed 's/^/  /'
 
-# (a2) 去品牌化：分发的 glibc rootfs 是**修改版**（打了 seccomp 补丁），
-#      不能顶着发行版原名出去 —— Ubuntu 是 Canonical 的注册商标、
-#      Alpaquita 是 BellSoft 的商标。把 os-release / issue / motd 换成
-#      本项目名字，删掉 logo 与 motd 广告脚本；包数据库、apt 源、
-#      /usr/share/doc 下的版权声明一律保留（功能与合规所需）。
-#      DEBRAND=0 可跳过（只用于对比原始镜像，不要用于发布）。
+# (a2) 发行版身份处理：分发的 glibc rootfs 是**修改版**（打了 seccomp 补丁）。
+#      Debian 走 mark（保留名称 + 明确告知是修改版）；Alpaquita / Ubuntu 走
+#      debrand（换成 pocketroot base，删 logo 与 motd 广告脚本）。
+#      两种模式下包数据库、apt 源、/usr/share/doc 的版权声明一律保留
+#      （功能与合规所需）。DEBRAND=0 可跳过（只用于对比原始镜像）。
 if [ "$FLAVOR" = glibc ] && [ "${DEBRAND:-1}" != 0 ]; then
-    python3 "$BASE/tools/debrand-rootfs.py" "$STAGE/rootfs" \
-        --manifest="$STAGE/assets/debrand-manifest.json" | sed 's/^/  /'
-    python3 "$BASE/tools/debrand-rootfs.py" "$STAGE/rootfs" --check | sed 's/^/  /'
+    # 模式按基准发行版自动选：Debian 保留名称、只加修改版告知（mark）；
+    # 其余（Alpaquita / Ubuntu 等）整体换成 pocketroot base（debrand）。
+    # 用 IDENTITY=debrand|mark|none 可强制指定。
+    BASE_ID=$(sed -n 's/^ID=//p' "$STAGE/rootfs/usr/lib/os-release" 2>/dev/null \
+              | head -1 | tr -d '"')
+    [ -n "$BASE_ID" ] || BASE_ID=$(sed -n 's/^ID=//p' "$STAGE/rootfs/etc/os-release" 2>/dev/null \
+                                   | head -1 | tr -d '"')
+    case "$BASE_ID" in
+        debian) IMODE=mark ;;
+        *)     IMODE=debrand ;;
+    esac
+    IMODE="${IDENTITY:-$IMODE}"
+    if [ "$IMODE" != none ]; then
+        python3 "$BASE/tools/rootfs-identity.py" "$STAGE/rootfs" --mode=$IMODE \
+            --manifest="$STAGE/assets/debrand-manifest.json" | sed 's/^/  /'
+        python3 "$BASE/tools/rootfs-identity.py" "$STAGE/rootfs" --mode=$IMODE \
+            --check | sed 's/^/  /'
+    fi
 fi
 
 # (b) musl seccomp 补丁：构建期打一次并生成清单；命中数不为 1 会在此处

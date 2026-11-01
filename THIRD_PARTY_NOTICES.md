@@ -57,10 +57,15 @@ GNU libc（**LGPL-2.1**）与 BusyBox（**GPL-2.0**）等。
 | Debian | Software in the Public Interest | 指明包体系（dpkg/apt） |
 | PyTorch、NumPy 等 | 各自基金会/公司 | 用户自行安装的运行期依赖 |
 
-为避免修改版被误认为官方产物，**分发的 glibc rootfs 已去品牌化**
-（`tools/debrand-rootfs.py`）：发行版名称、logo、motd 欢迎语与广告脚本均被替换或
-删除，标识改为 `pocketroot base`。包数据库、软件源、keyring、`/usr/share/doc`
-下的版权声明**未改动** —— 其中出现的原始名称属于指名性使用。
+为避免修改版被误认为官方产物，构建时会处理发行版身份（`tools/rootfs-identity.py`）：
+
+- **Debian 基线**：保留名称与版本，但明确标注为修改版（os-release 的 `VARIANT_ID`/
+  `POCKETROOT_MODIFIED`、issue 与 motd 的告知行、`/etc/pocketroot-build.json`）。
+  Debian 的商标政策允许「基于 Debian」的表述。
+- **Alpaquita / Ubuntu 基线**：标识整体换成 `pocketroot base`，logo 与 motd 广告脚本删除。
+
+包数据库、软件源、keyring、`/usr/share/doc` 下的版权声明**未改动** —— 其中出现的
+原始名称属于指名性使用。
 
 ## 文档中的实证数据
 

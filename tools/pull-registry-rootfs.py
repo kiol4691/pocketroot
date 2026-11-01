@@ -8,17 +8,20 @@
 仓库不内置 glibc rootfs 镜像（体积与再分发条款），构建时按需拉取。
 没有 docker 二进制也能做：OCI registry 就是 HTTP + 匿名 token。
 
+做法
+----
+逐层下载并在**内存里解压叠加**，处理 OCI 的 whiteout 标记，最后重新打包成一个
+tar.gz。为什么不直接把各层的 gzip 拼起来：GNU tar 读到第一个归档的 EOF 块就停，
+后面的层会被静默丢弃（实测：python:3.13-slim 拼起来只解出 Debian 基础层，
+105 MB 里根本没有 /usr/local/bin/python）。
+
 用法
 ----
-    # Docker Hub 官方镜像
-    python3 tools/pull-registry-rootfs.py docker.io/library/debian:trixie-slim -o assets/glibc-rootfs.tar.gz
-
-    # GHCR
-    python3 tools/pull-registry-rootfs.py ghcr.io/bell-sw/alpaquita-linux-base:stream-glibc \\
-        -o assets/glibc-rootfs.tar.gz
-
-    # 只打印可用于钉住版本的 digest，不下载
-    python3 tools/pull-registry-rootfs.py docker.io/library/debian:trixie-slim --print-digests
+    python3 tools/pull-registry-rootfs.py docker.io/library/debian:trixie-slim \
+            -o /tmp/debian-trixie-slim-arm64.tar.gz
+    python3 tools/pull-registry-rootfs.py ghcr.io/bell-sw/alpaquita-linux-base:stream-glibc \
+            -o /tmp/alpaquita.tar.gz
+    python3 tools/pull-registry-rootfs.py docker.io/library/python:3.13-slim --print-digests
 
 退出码
 ------
@@ -29,8 +32,13 @@
 
 import argparse
 import hashlib
+import io
 import json
+import os
+import shutil
 import sys
+import tarfile
+import tempfile
 import urllib.request
 
 ACCEPTS = ",".join([
@@ -41,7 +49,6 @@ ACCEPTS = ",".join([
     "application/vnd.oci.image.layer.v1.tar+gzip",
 ])
 
-# registry -> (api base, token endpoint)
 REGISTRIES = {
     "docker.io": ("https://registry-1.docker.io/v2",
                   "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"),
@@ -55,13 +62,34 @@ def http(url, headers=None, accept=ACCEPTS):
     if accept:
         h["Accept"] = accept
     req = urllib.request.Request(url, headers=h)
-    with urllib.request.urlopen(req, timeout=120) as r:
+    with urllib.request.urlopen(req, timeout=180) as r:
         return r.read()
 
 
 def token_for(reg, repo):
-    url = REGISTRIES[reg][1].format(repo=repo)
-    return json.loads(http(url, accept="application/json"))["token"]
+    return json.loads(http(REGISTRIES[reg][1].format(repo=repo),
+                           accept="application/json"))["token"]
+
+
+def apply_whiteouts(root):
+    """OCI whiteout：`.wh.<name>` 表示删除下层同名路径，
+    `.wh..opq` 表示清空该目录下层内容。"""
+    for dirpath, dirnames, filenames in os.walk(root):
+        for f in filenames:
+            if f == ".wh..opq":
+                for e in os.listdir(dirpath):
+                    if e == f:
+                        continue
+                    p = os.path.join(dirpath, e)
+                    shutil.rmtree(p) if os.path.isdir(p) and not os.path.islink(p) else os.unlink(p)
+                os.unlink(os.path.join(dirpath, f))
+            elif f.startswith(".wh."):
+                target = os.path.join(dirpath, f[len(".wh."):])
+                if os.path.isdir(target) and not os.path.islink(target):
+                    shutil.rmtree(target, ignore_errors=True)
+                elif os.path.exists(target) or os.path.islink(target):
+                    os.unlink(target)
+                os.unlink(os.path.join(dirpath, f))
 
 
 def main() -> int:
@@ -90,9 +118,7 @@ def main() -> int:
     base = REGISTRIES[reg][0]
     auth = {"Authorization": "Bearer " + token_for(reg, repo)}
 
-    body = http("%s/%s/manifests/%s" % (base, repo, tag), auth)
-    m = json.loads(body)
-
+    m = json.loads(http("%s/%s/manifests/%s" % (base, repo, tag), auth))
     if "manifests" in m:
         digest = None
         for e in m["manifests"]:
@@ -103,8 +129,7 @@ def main() -> int:
         if digest is None:
             print("该镜像没有 linux/%s 的变体" % a.arch)
             return 1
-        body = http("%s/%s/manifests/%s" % (base, repo, digest), auth)
-        m = json.loads(body)
+        m = json.loads(http("%s/%s/manifests/%s" % (base, repo, digest), auth))
 
     layers = m.get("layers", [])
     if not layers:
@@ -113,18 +138,30 @@ def main() -> int:
 
     print("image: %s:%s (%s)" % (repo, tag, a.arch))
     for l in layers:
-        print("  layer %s  %d bytes" % (l["digest"], l["size"]))
+        print("  layer %s  %d bytes" % (l["digest"][:19], l["size"]))
     if a.print_digests:
-        print("钉版本用：%s@%s" % (repo, m.get("config", {}).get("digest", "?")))
+        print("钉版本用: %s@%s" % (repo, m.get("config", {}).get("digest", "?")))
         return 0
 
-    h = hashlib.sha256()
-    with open(a.out, "wb") as fh:
+    tmp = tempfile.mkdtemp(prefix="pull-rootfs-")
+    try:
         for l in layers:
             data = http("%s/%s/blobs/%s" % (base, repo, l["digest"]), auth)
-            fh.write(data)
-            h.update(data)
-    print("写出 %s (%d bytes)" % (a.out, h.hexdigest()[:16]))
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+                tf.extractall(tmp)
+        apply_whiteouts(tmp)
+        n = sum(len(f) for _r, _d, f in os.walk(tmp))
+        print("解出 %d 个条目" % n)
+        with tarfile.open(a.out, "w:gz") as tf:
+            tf.add(tmp, arcname=".")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    h = hashlib.sha256()
+    with open(a.out, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    print("写出 %s（%d bytes）" % (a.out, os.path.getsize(a.out)))
     print("sha256: " + h.hexdigest())
     print("下一步: ROOTFS_TGZ=%s ./build.sh --glibc" % a.out)
     return 0
