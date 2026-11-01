@@ -101,6 +101,60 @@ make -C tests bench && tests/bench_translate 200000
 
 `build.sh` 会**先跑单元测试**再构建 —— 核心算法变了会立刻失败。
 
+### 4.1 构建依赖
+
+仓库**不内置**工具链（`tools/zig-*`、`tools/ecj.jar` 都在 `.gitignore` 里），需要自己准备。
+全部依赖都是 x86_64 Linux 上的宿主工具，构建本身不需要 Android 设备。
+
+| 依赖 | 版本 | 用途 | 获取方式 |
+|---|---|---|---|
+| JDK | 17+ | 跑 ecj / d8 / apksigner | `apt install openjdk-17-jdk` 或发行版对应包 |
+| Android SDK | build-tools 33+ / platform 33+ | `aapt2` `d8` `zipalign` `apksigner` | Android Studio SDK Manager，或 `sdkmanager "build-tools;35.0.0" "platforms;android-35"` |
+| Zig | **0.13.0** | 交叉编译 shim（`aarch64-linux-musl` / `aarch64-linux-gnu`） | <https://ziglang.org/download/0.13.0/>，解压即用 |
+| Eclipse JDT 编译器 | 任意近期版本 | 编译 Java（不用 javac，见下） | <https://download.eclipse.org/eclipse/downloads/> 的 `ecj-*.jar`，或 Maven `org.eclipse.jdt:ecj` |
+| Python | 3.8+ | 跑补丁脚本 `tools/patch-*.py` | 系统自带 |
+
+**为什么是 Zig 0.13.0**：`build.sh` 用 `zig cc -target aarch64-linux-musl` 交叉编译一个
+不链接 libc 的 shim，并依赖 0.13 版的 musl 头文件布局。换大版本前请先跑 `make -C tests check`。
+
+**为什么用 ecj 而不是 javac**：build-tools 自带的 d8 处理 JDK 21 生成的匿名内部类会 NPE，
+ecj 生成的 class 与 Android 工具链兼容性最好。
+
+### 4.2 环境变量
+
+`build.sh` 全部依赖都能用环境变量覆盖，默认值见脚本第 45–95 行：
+
+```bash
+export ANDROID_HOME=$HOME/Android/Sdk        # 或 ANDROID_SDK_ROOT
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+export ZIG=/opt/zig-linux-x86_64-0.13.0/zig  # 默认 $BASE/tools/zig-linux-x86_64-0.13.0/zig
+export ECJ=/opt/ecj.jar                      # 默认 $BASE/tools/ecj.jar
+# 可选：BT / PLAT 指定 build-tools 与 platform；不设则取 SDK 里最新的
+# 可选：ROOTFS_TGZ 指定 rootfs 压缩包（见下）
+# 可选：KS 指定签名 keystore；不存在时会用 keytool 自动生成一个自签名（口令 znglab）
+```
+
+### 4.3 一条命令的最小流程
+
+```bash
+git clone <repo> && cd pocketroot
+curl -LO https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
+tar -xf zig-linux-x86_64-0.13.0.tar.xz -C tools/
+curl -L -o tools/ecj.jar https://repo1.maven.org/maven2/org/eclipse/jdt/ecj/3.38.0/ecj-3.38.0.jar
+
+export ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+./build.sh                 # 产物: out/pocketroot-<ver>-arm64.apk
+```
+
+### 4.4 rootfs 来源
+
+- `--musl`（默认）：`assets/alpine-rootfs.tar.gz`（仓库内，3.8 MB）
+- `--glibc`（默认）：`assets/glibc-rootfs.tar.gz`（仓库内，6.9 MB，BellSoft Alpaquita）
+- 换别的发行版：`ROOTFS_TGZ=/path/to/ubuntu-base-arm64.tar.gz ./build.sh --glibc`
+
+> 换 rootfs 时 `build.sh` 会用 tarball 的 SHA-256 作戳自动清理 stage；同名但内容不同的
+> 场景不会被混在一起（早前手工清理踩过一次，已修）。
+
 ## 5. 验证状态（诚实版）
 
 **已验证**
