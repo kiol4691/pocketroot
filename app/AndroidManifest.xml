@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: MIT -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.pocketroot"
+    android:versionCode="2"
+    android:versionName="0.2.0">
+
+    <!--
+      targetSdk=28 是本方案的**硬前提**，不要随意上调：
+
+      Android 从 10（API 29）起禁止在 app 私有数据目录 exec 原生代码
+      （W^X 严格化）。targetSdk ≤ 28 的应用仍被豁免，Termux 用的就是这一点。
+      一旦上调，rootfs 里的二进制即使有可执行位也会被拒绝执行，
+      表现为 exit=126 / Permission denied，且无从绕过。
+
+      代价：无法使用新 API，也享受不到新版的行为变更修复。对本项目可接受。
+    -->
+    <uses-sdk
+        android:minSdkVersion="24"
+        android:targetSdkVersion="28" />
+
+    <!-- 网络仅用于 apk update 等 guest 命令；不需要存储权限（只用私有目录） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:label="pocketroot"
+        android:allowBackup="false"
+        android:debuggable="true"
+        android:theme="@android:style/Theme.DeviceDefault">
+        <!--
+          debuggable=true 使 `adb shell run-as com.pocketroot` 可用，
+          从而能直接查看 App 私有目录（rootfs 解包结果、shim 日志）——
+          这是在没有 logcat 输出时（部分 ROM 会屏蔽三方 App 日志）
+          唯一可靠的观测手段。发布版本应置为 false。
+        -->
+
+        <!--
+          extractNativeLibs=true 是必需的：
+          libzng.so 必须以**普通文件**形式存在于
+          /data/app/.../lib/arm64/ 下，才能作为 LD_PRELOAD 的目标。
+          若为 false（或未压缩对齐），链接器无法按路径加载它。
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:extractNativeLibs="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

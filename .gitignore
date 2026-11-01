@@ -1,0 +1,21 @@
+# 构建产物
+out/
+build/
+*.apk
+*.idsig
+*.keystore
+keystore.properties
+
+# 内置工具链（用 ZIG= / ECJ= 指向系统版本即可）
+tools/zig-linux-x86_64-*/
+tools/ecj.jar
+tools/__pycache__/
+
+# 测试/基准产物
+tests/test_main
+tests/test_main-asan
+tests/bench_translate
+
+# 本地环境
+local.properties
+.DS_Store

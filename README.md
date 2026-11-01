@@ -1,0 +1,170 @@
+# pocketroot
+
+Android 上的 rootfs 路径重定向 shim（LD_PRELOAD，零 ptrace）。
+
+本项目是同一作者三次重写的第三代：桌面版 **zroot** → Android 前作 **zroot-lab** → 本作。
+目标不是"再写一个能跑的 PoC"，而是**把前两代的设计缺陷逐个消掉**，
+并让核心算法第一次变得可验证。下文用 **A / B** 指代前两代（两者均未公开发布）。
+
+> 内部标识（`ZNG_*` 环境变量、`zng_` 符号前缀、`libzng.so`）沿用第二代的缩写，
+> 与项目名解耦；改名不影响任何对外接口。
+
+---
+
+## 1. 设计原则（每一条都对应一个已定位的缺陷）
+
+| # | 原则 | 针对的缺陷 |
+|---|---|---|
+| 1 | **显式传参，不用全局可变状态** | A 的 `zt_g` 是 524KB 全局 BSS（64 个 bind × 两个 `char[4096]`）；B 的 `z_mkbuf()` 是 24×4096 环形池 + 全局游标 `z_pi`，天然非线程安全 |
+| 2 | **统一 `-errno` 返回** | A 里 `zt_translate` 返回 `1/0/-1`、`zt_host_guest` 返回 `0/1/-errno`，两套约定并存 |
+| 3 | **输出缓冲由调用方提供、长度显式** | A 的 `zt_binds_serialize` 用 64KB 栈数组，溢出即**静默丢弃全部 bind**；B 的路径过长时**原样透传到 host**（把隔离漏洞伪装成成功调用） |
+| 4 | **I/O 与解析分离，解析是纯函数** | A 的 `zt_elf_probe_fd()` 边读 fd 边解析，无法脱离内核单测 |
+| 5 | **fail-visible：降级必须可观测** | A 的 `ZT_HOSTNATIVE` 把"rootfs 缺解释器"猜成"用 host libc 跑"，导致 ABI 不匹配的诡异崩溃；A 的 `zt_fixup_argv0` 找不到 argc 就静默放弃 |
+| 6 | **errno 写入前检查符号存在性** | A 直接 `*__errno_location()` 解引用，符号缺失即 NULL 解引用崩溃（B 用 weak + 检查，这里沿用） |
+
+## 2. 相对 A / B 的具体改动
+
+**架构**
+
+- **bind 表替代白名单**：B 的 `z_tr()` 是"顶层目录白名单 passthrough，其余一律重定向"，
+  没有 bind、没有 `fake_root`、不处理 `..`。这里用统一的 bind 表，两个概念合并，
+  默认 bind 由 App 通过 `ZNG_BINDS` 注入（shim 不硬编码 Android 目录，保持可测）。
+- **双解析引擎**：`openat2(RESOLVE_IN_ROOT)` 主引擎 + 用户态降级。
+  B 完全没有运行时符号链接解析，只能靠构建期改写 306 个 symlink；
+  A 有双引擎但降级条件分散，这里显式化为 `should_fallback()`。
+- **`openat2` 的 TOCTOU 收益**：`zng_open_guest()` 用**同一个 syscall** 完成解析与打开，
+  消除了"先解析路径、再打开"的窗口。
+
+**Android 平台对策**（`zng_hooks.c`）
+
+| 对策 | A | B | pocketroot |
+|---|---|---|---|
+| setuid 家族 | 挂在 `fake_root` 条件下 | 无条件 return 0 | **无条件** return 0（凭证 syscall 是显式 BLOCKLIST，与是否伪造 root 无关） |
+| statx(291) | 正常发 syscall（在 Android 上 shim 自己会 SIGSYS） | 返回 ENOSYS，把回退甩给调用方 | **用 fstatat 回填完整 statx**，功能不丢失，完全不发 291 |
+| faccessat2(439) | 无此 hook | 返回降级 | 降级到 `faccessat`(48)，保留可支持的标志位 |
+| musl 内部直接 syscall | 无对策 | 设备端每次解包打机器码补丁 | **构建期**打一次 + 生成清单，设备端只校验哈希 |
+
+**musl 补丁时机**（`tools/patch-musl.py`）—— 这是相对 B 最大的流程改动：
+
+```
+B:      设备端，每次启动 → 扫描 700KB libc → 打补丁 → 命中数≠1 则不写盘（上层仍继续）
+pocketroot: 构建期，一次性 → 打补丁 → 命中数≠1 即非零退出 → 生成 manifest → 设备端只校验 SHA-256
+```
+
+失败模式从"用户设备上的静默降级"变成"构建流水线上的硬失败"。
+
+**日志**：B 0.1.8 把 `ZROOT_DEBUG` 常开打到 stderr，shell 输出与 relay 日志混在一起。
+这里支持 `ZNG_LOG=<path>` 把 shim 日志写到独立文件，stderr 保持干净。
+
+**argv[0]**：musl 的 ld.so 没有 `--argv0`，所以中继启动时程序看到的是 host 路径。
+- A：栈上反向扫描找 argc（依赖未文档化布局，扫描 4096 槽，失败静默，且被 `|| 1` 强制对每个进程执行）
+- B：不修
+- pocketroot：**分级**。级别 1 改写 libc 的 `program_invocation_name` / `__progname` 全局指针
+  （与栈布局无关，失败可检测，覆盖 `getprogname()`、错误输出等）；
+  级别 2 栈回溯按编译开关 `ZNG_FIX_ARGV0_STACK` 可选开启，带多重校验且失败时日志可见。
+
+## 3. 目录结构
+
+```
+shim/
+  zng.h          公共定义（类型、errno、pathview、接口）
+  zng_sys.h      syscall 号表（aarch64 + x86_64）与封装
+  zng_core.c     纯逻辑：配置、路径翻译、ELF 解析、exec 计划  ← 可单测
+  zng_run.c      解析引擎（双引擎）与 exec 执行
+  zng_hooks.c    libc 钩子 + Android seccomp 对策
+  zng_ctor.c     初始化、日志、argv0 分级修复
+tests/
+  test_main.c    核心逻辑单元测试（x86_64，可 ASan/UBSan）
+tools/
+  patch-musl.py  构建期 musl seccomp 补丁 + 清单生成
+  patch-glibc-syscalls.py  构建期 glibc seccomp 补丁（改返回值语义）
+  zprobe.c       静态探针：在 App 进程的 seccomp 下逐条试 syscall
+  zthreads.c     线程密集压测（clone 回退 / TLS / 锁争用 / 条件变量），
+                 两个变体各编一份：glibc 动态、musl 静态
+app/             Android 测试终端
+build.sh         全手动 APK 构建
+```
+
+## 4. 构建与测试
+
+```bash
+# 核心逻辑单元测试（不需要 Android 工具链）
+make -C tests check      # ASan + UBSan
+
+# APK（需要 zig cc、aapt2、ecj、d8、apksigner）
+./build.sh            # Alpine (musl) 变体
+./build.sh --glibc    # glibc 变体（默认 Alpaquita，可用 ROOTFS_TGZ 换 Ubuntu 等）
+
+# 路径翻译热路径微基准（宿主机，不需要设备）
+make -C tests bench && tests/bench_translate 200000
+```
+
+`build.sh` 会**先跑单元测试**再构建 —— 核心算法变了会立刻失败。
+
+## 5. 验证状态（诚实版）
+
+**已验证**
+
+- 核心逻辑 194 项断言，在 x86_64 上以 ASan + UBSan 通过（`make -C tests check`）：
+  路径视图、翻译/反向翻译、`..` 语义、bind 最长前缀与上限、ELF 解析（含畸形输入）、
+  env 构造（含 `envp==NULL` 回归）、exec 计划（musl / glibc / 未知加载器）。
+- 全部 shim 源文件以 `-nostdlib -ffreestanding -Wall -Wextra` **零告警**编译通过
+  （两个架构的 syscall 号表均参与编译）。
+- x86_64 syscall 号表用 `_Static_assert` 与 libc 常量逐条对照。
+
+**真机已验证**（Android 14 / arm64 真机，详见 `docs/device-verification.md`）
+
+在 **App 进程**（装了 zygote seccomp 过滤器的真实环境）中三门禁全部通过：
+`apk --version` 正常（gate1，W^X exec）、`readlink /proc/self/exe` 返回 guest 视图
+（gate2）、`env -i` 自净对抗 rc=0 且子进程 `binds=3`（gate3）；
+另有 shebang、写读、PATH exec、`/proc` bind、隔离性、`apk info` 全部 rc=0。
+
+真机共暴露 **8 个 bug**，全部已修复并记录在 `docs/device-verification.md`
+（含"为什么本机单测发现不了"）。其中最严重的是：无条件调用 `openat2` 做能力探测，
+在 App 进程直接触发 SIGSYS —— **adb shell 里完全测不出来**，因为 adb shell
+不是 app 进程、没有那套 seccomp 过滤器。
+
+**仍未验证**
+
+- **arm64 syscall 号表无法自动校验**：`_Static_assert` 对照只在 x86_64 上做
+  （测试跑在 x86_64）。真机上能跑通，间接说明用到的号都是对的，
+  但表中未被实际使用的号仍未经校验。
+- 16KB 页设备（Pixel 16K 开发者模式）。
+- glibc rootfs（PyTorch 场景）：`rseq` 等 syscall 的 seccomp 风险未实测，
+  见 `docs/heavy-workloads.md` 的处置顺序。
+- PyTorch / Docker 镜像：本机无 arm64 设备可长时间占用做完整安装验证。
+
+## 6. 已知限制
+
+- **v1 不支持静态二进制**：遇到无 `PT_INTERP` 的 ELF 返回 `-ENOSYS` 并记日志，
+  而不是像 A 那样猜测 host native。需要静态支持时，路线是引入 ptrace 兜底
+  （但那是 A 里风险最高的 900 行，且 Android 上还受 SELinux 约束，建议先不做）。
+- **转发层已覆盖**：`fopen`/`freopen`/`opendir`、`realpath`/`canonicalize_file_name`/
+  `get_current_dir_name`、`mkstemp` 家族（含 `mkostemps`）、`scandir`/`scandirat`、
+  `glob`/`glob64`、`popen`/`pclose`/`system`、`posix_spawn`（含 `file_actions` 路径翻译）、
+  `dlopen`（绝对路径）、`statvfs`、`truncate64`/`utimes`/`lutimes`。
+  但 libc **内部**发起的调用（`__open`、`open_nocancel`）仍会绕过钩子，与 A/B 同限；
+  `/etc/resolv.conf`、`/etc/passwd` 这类被 libc 内部读取的文件，只能靠 rootfs 内
+  提供正确内容来"喂对"，无法拦截重定向。
+- **不是安全沙箱**：这是路径重定向视图，不是权限隔离。guest 内进程仍以 app uid
+  直接发起 syscall；未被钩住的 `syscall()` 直调、libc 内部读取（musl 的
+  `getaddrinfo` / `getpwuid`）、`/proc` 都会穿透。**不要用它跑不可信代码。**
+- `zng_resolve()` 的 `dirfd` 参数当前未使用（相对路径一律透传，内核基于 dirfd 解析
+  本就正确）；仅当"dirfd 指向 rootfs 内且路径含需重定向的绝对符号链接"时才需介入。
+- `rename`/`link` 两端跨 bind 时内核会正确报 `EXDEV`，不做跨设备模拟。
+
+## 7. 许可
+
+本项目（代码 + 文档）以 **MIT** 授权，见 [LICENSE](LICENSE)。
+每个源文件头部有 `SPDX-License-Identifier: MIT`。
+
+三代关系（A 桌面版 zroot / B Android 前作 zroot-lab / 本作 pocketroot）都是同一作者的
+作品，A、B 均未公开发布，因此本项目不存在继承自第三方的代码或版权声明。
+
+分发的 rootfs 资产里含有**被修改过的 libc**，以及 BusyBox 等 GNU 程序，
+这部分不适用 MIT：
+
+- 第三方组件清单与各自许可：[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+- 被修改二进制的源码获取方式：[SOURCE_OFFER.md](SOURCE_OFFER.md)
+
+> 内部标识（`ZNG_*`、`zng_` 前缀、`libzng.so`）沿用第二代的缩写，与项目名解耦。
