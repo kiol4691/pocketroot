@@ -182,8 +182,8 @@ slim 镜像刻意裁掉了不少东西，其中 `libgomp1` 是 PyTorch CPU 后�
 所以在宿主机上直接完成。
 
 ```bash
-# 补装 arm64 deb（默认：libgomp1 libatomic1 procps curl ca-certificates less file tzdata）
-python3 tools/add-debs.py /tmp/rootfs --suite trixie
+# 补装 arm64 deb（--profile minimal|light|full，--pkgs 可追加，--dry-run 只解析）
+python3 tools/add-debs.py /tmp/rootfs --profile light --suite trixie
 
 # 离线装 Python 包（按 cp313 + aarch64 挑选，解压进 site-packages，并对 .so 做架构自检）
 python3 tools/add-wheels.py /tmp/rootfs --py 3.13 --arch aarch64 \
@@ -207,8 +207,8 @@ python3 tools/pull-registry-rootfs.py docker.io/library/python:3.13-slim \
 mkdir -p /tmp/rootfs && tar -xzf /tmp/py313.tar.gz -C /tmp/rootfs
 
 # 工具链：git / 编辑器 / 压缩 / 网络 / 进程查看 / OpenMP
-python3 tools/add-debs.py /tmp/rootfs \
-        --pkgs git,less,file,procps,curl,ca-certificates,tzdata,vim-tiny,nano,zip,unzip,jq,openssh-client,libgomp1,libatomic1,make
+# light 是默认 profile（另见 minimal / full）
+python3 tools/add-debs.py /tmp/rootfs --profile light
 
 # Python：数值 + HTTP + 办公文档
 python3 tools/add-wheels.py /tmp/rootfs --py 3.13 \

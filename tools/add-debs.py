@@ -27,8 +27,12 @@ Debian 的 slim 镜像刻意裁掉了非必需组件，其中一些是本项目�
 
 用法
 ----
-    python3 tools/add-debs.py ROOTFS [--pkgs libgomp1,libatomic1,curl] \
-            [--suite trixie] [--manifest out.json]
+    python3 tools/add-debs.py ROOTFS [--profile minimal|light|full] \
+            [--pkgs 追加的包] [--suite trixie] [--dry-run] [--manifest out.json]
+    python3 tools/add-debs.py --list-profiles
+
+装了哪些 profile 写在文件里的 PROFILES 表，--list-profiles 直接打印。
+
 
 退出码
 ------
@@ -50,16 +54,54 @@ import tempfile
 import urllib.request
 
 MIRROR = "http://deb.debian.org/debian"
-DEFAULT_PKGS = [
-    "libgomp1",        # OpenMP：PyTorch CPU 后端必需
-    "libatomic1",      # 同上，部分数学库用到
-    "procps",          # ps / top
-    "curl",
-    "ca-certificates",
-    "less",
-    "file",
-    "tzdata",
-]
+
+# 三档预设。默认 light —— 轻度编码 + 日常办公够用；
+# 想加包用 --pkgs 追加，不必改这里。
+PROFILES = {
+    # 只保证"Python 的二进制轮子能加载"：
+    # libgomp 是 OpenMP（numpy/torch 的 CPU 后端），libatomic 是部分数学库
+    "minimal": [
+        "libgomp1",
+        "libatomic1",
+        "ca-certificates",
+        "tzdata",
+    ],
+    # 轻度编码 + 日常办公：命令行工具齐了，但没有编译器
+    "light": [
+        "libgomp1",
+        "libatomic1",
+        "ca-certificates",
+        "tzdata",
+        "git",
+        "openssh-client",
+        "vim-tiny",
+        "nano",
+        "less",
+        "file",
+        "procps",
+        "curl",
+        "zip",
+        "unzip",
+        "jq",
+        "make",
+    ],
+    # 在 rootfs 里能自己编译东西（gcc 全家桶，体积 +150 MB 量级）
+    "full": [
+        "build-essential",
+        "rsync",
+        "tmux",
+        "tree",
+        "sqlite3",
+        "htop",
+        "patch",
+        "gdb",
+        "strace",
+    ],
+}
+
+# full 是在 light 之上叠的，而不是替换 —— 否则装完 full 反而没有 git
+PROFILES["full"] = PROFILES["light"] + PROFILES["full"]
+DEFAULT_PROFILE = "light"
 
 
 def get(url, binary=True):
@@ -101,6 +143,15 @@ def installed_names(rootfs: str) -> set:
         for line in open(st, encoding="utf-8", errors="replace"):
             if line.startswith("Package: "):
                 names.add(line.split(":", 1)[1].strip())
+    # 本工具装过的包（不写 dpkg 状态库，所以单独记一份清单）
+    man = os.path.join(rootfs, "etc/pocketroot-debs.json")
+    if os.path.exists(man):
+        try:
+            data = json.load(open(man, encoding="utf-8"))
+            for item in data.get("added", []):
+                names.add(item.get("package", ""))
+        except (ValueError, OSError):
+            pass
     return names
 
 
@@ -113,6 +164,8 @@ def dep_names(dep_field: str):
             continue
         first = item.split("|")[0].strip()
         name = re.split(r"[ (<>=]", first, 1)[0].strip()
+        # 去掉架构限定（perl:any、python3:any），索引里没有带后缀的条目
+        name = name.split(":")[0]
         if name:
             out.append(name)
     return out
@@ -120,11 +173,22 @@ def dep_names(dep_field: str):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("rootfs")
-    ap.add_argument("--pkgs", default=",".join(DEFAULT_PKGS))
+    ap.add_argument("rootfs", nargs="?", default="")
+    ap.add_argument("--profile", default=DEFAULT_PROFILE,
+                    choices=sorted(PROFILES),
+                    help="预设包集合（默认 light）")
+    ap.add_argument("--pkgs", default="", help="追加的包，逗号分隔")
+    ap.add_argument("--list-profiles", action="store_true")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="只解析依赖并打印，不下载")
     ap.add_argument("--suite", default="trixie")
     ap.add_argument("--manifest", default="")
     a = ap.parse_args()
+
+    if a.list_profiles:
+        for name in sorted(PROFILES):
+            print("%-8s %s" % (name, " ".join(PROFILES[name])))
+        return 0
 
     if not os.path.isdir(a.rootfs):
         print("[FAIL] rootfs 目录不存在: " + a.rootfs)
@@ -135,7 +199,10 @@ def main() -> int:
     print("  %d 个包" % len(index))
 
     have = installed_names(a.rootfs)
-    queue = [p.strip() for p in a.pkgs.split(",") if p.strip()]
+    wanted = list(PROFILES[a.profile])
+    wanted += [p.strip() for p in a.pkgs.split(",") if p.strip()]
+    print("profile=%s，请求 %d 个包" % (a.profile, len(wanted)))
+    queue = wanted
     chosen = []
     seen = set()
     missing = []
@@ -162,6 +229,9 @@ def main() -> int:
     if missing:
         print("  !! 索引里找不到：%s" % ", ".join(missing))
     print("待装 %d 个包：%s" % (len(chosen), " ".join(chosen)))
+    if a.dry_run:
+        print("[ok]   dry-run：未下载")
+        return 0
 
     tmp = tempfile.mkdtemp(prefix="add-debs-")
     added = []
@@ -195,8 +265,18 @@ def main() -> int:
         shutil.rmtree(tmp, ignore_errors=True)
 
     info_path = os.path.join(a.rootfs, "etc/pocketroot-debs.json")
+    prev = []
+    if os.path.exists(info_path):
+        try:
+            prev = json.load(open(info_path, encoding="utf-8")).get("added", [])
+        except (ValueError, OSError):
+            prev = []
+    merged = {x["package"]: x for x in prev}
+    for x in added:
+        merged[x["package"]] = x
     with open(info_path, "w", encoding="utf-8") as fh:
-        json.dump({"suite": a.suite, "mirror": MIRROR, "added": added},
+        json.dump({"suite": a.suite, "mirror": MIRROR,
+                   "added": list(merged.values())},
                   fh, indent=2, ensure_ascii=False)
     print("[ok]   补装 %d 个包，清单写入 /etc/pocketroot-debs.json" % len(added))
 
