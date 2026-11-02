@@ -160,7 +160,9 @@ OLD_SHA="$(cat "$STAMP" 2>/dev/null || echo none)"
 if [ -d "$STAGE/rootfs" ] && [ "$OLD_SHA" != "$WANT_SHA" ]; then
     echo "  stage 与 rootfs 不一致（${OLD_SHA:0:12} -> ${WANT_SHA:0:12}），清理重建"
     rm -rf "$STAGE"
-    mkdir -p "$STAGE/rootfs"
+    # assets/ 是第 2 步建的，这里整目录删掉后必须重建，否则后面的清单/脚本拷贝
+    # 会写到一个不存在的目录（实测：换 rootfs 后 mark 模式写 manifest 直接 ENOENT）
+    mkdir -p "$STAGE/rootfs" "$STAGE/assets"
 fi
 echo "$WANT_SHA" > "$STAMP"
 tar -xzf "$ROOTFS_TGZ" -C "$STAGE/rootfs"

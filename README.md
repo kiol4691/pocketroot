@@ -197,6 +197,46 @@ ROOTFS_TGZ=/tmp/rootfs.tar.gz ./build.sh --glibc
 两个脚本都会把清单写进 rootfs（`/etc/pocketroot-debs.json`、`/etc/pocketroot-wheels.json`），
 含包名、版本与 sha256。
 
+### 4.6 轻量配方（轻度编码 + 日常办公）
+
+默认只装「能干活」的最小集合，解包约 **343 MB**、APK 约 **98 MB**：
+
+```bash
+python3 tools/pull-registry-rootfs.py docker.io/library/python:3.13-slim \
+        -o /tmp/py313.tar.gz                        # Debian 13 + Python 3.13 + pip
+mkdir -p /tmp/rootfs && tar -xzf /tmp/py313.tar.gz -C /tmp/rootfs
+
+# 工具链：git / 编辑器 / 压缩 / 网络 / 进程查看 / OpenMP
+python3 tools/add-debs.py /tmp/rootfs \
+        --pkgs git,less,file,procps,curl,ca-certificates,tzdata,vim-tiny,nano,zip,unzip,jq,openssh-client,libgomp1,libatomic1,make
+
+# Python：数值 + HTTP + 办公文档
+python3 tools/add-wheels.py /tmp/rootfs --py 3.13 \
+        --pkgs numpy,requests,openpyxl,python-docx
+
+# 瘦身（删 man/info/perl POD/python 测试/locale，**保留 copyright**）
+python3 tools/slim-rootfs.py /tmp/rootfs
+
+# 标注修改版并打包
+python3 tools/rootfs-identity.py /tmp/rootfs --mode=mark
+tar -czf /tmp/light-arm64.tar.gz -C /tmp/rootfs .
+ROOTFS_TGZ=/tmp/light-arm64.tar.gz ./build.sh --glibc
+```
+
+体积构成（解包后）：
+
+| 部分 | 大小 |
+|---|---|
+| Debian 13 + Python 3.13 + pip | 148 MB |
+| + 54 个 deb（git 与其依赖占大头：git-core 25 MB、perl 约 34 MB） | +156 MB |
+| − 瘦身（man / info / perl POD / python test / locale） | −29 MB |
+| + numpy / requests / openpyxl / python-docx（含 lxml） | +15 MB |
+| **合计** | **343 MB** |
+
+不想带 git 的话去掉它和 `openssh-client` 能省约 80 MB（回到 260 MB 左右），
+但 `git add -p` 之类依赖 perl 的功能也会一起没有。要做科学计算再把 scipy/pandas/
+matplotlib 加上（+160 MB），见 §4.5。
+
 ## 5. 验证状态（诚实版）
 
 **已验证**
