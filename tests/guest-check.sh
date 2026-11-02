@@ -71,7 +71,9 @@ echo "--- D 组：转发层（Python / 高级 libc 依赖）---"
 # realpath：os.path.realpath / pathlib 的基础
 ck "realpath"              "/etc"      "$(realpath /etc 2>&1)"
 # scandir / glob：目录枚举
-ck "ls 深层目录"            "passwd"    "$(ls /etc 2>&1 | grep -c passwd | sed 's/^1$/passwd/')"
+# 注意用 ^passwd$：Debian 的 /etc 里还有 passwd-（备份文件），
+# 只 grep "passwd" 会数到 2 而误判。
+ck "ls 深层目录"            "passwd"    "$(ls /etc 2>&1 | grep -c '^passwd$' | sed 's/^1$/passwd/')"
 # tmpfile / mkstemp：Python tempfile
 # 直接检查输出是否以 guest 的 /tmp/ 开头（host 路径会以 /data/ 开头，从而 FAIL）。
 # 注意别用 `| head -c 4`：busybox 的 head -c 在管道里会输出空串，造成误判。
@@ -133,7 +135,15 @@ echo "--- H 组：网络 / DNS ---"
 # resolv.conf 由部署方式决定：App 会写入它，手动 rootfs（如 /data/local/tmp
 # 那套）则没有。缺失时 SKIP —— 那不是 shim 的问题。
 if [ -f /etc/resolv.conf ]; then
-    ck "resolv.conf 存在"  "nameserver" "$(cat /etc/resolv.conf 2>&1 | head -1)"
+    # 首行常是注释（容器镜像把 resolv.conf 留空，由运行时挂载），
+    # 所以找第一条 nameserver，而不是只看 head -1。
+    NS=$(grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null)
+    if [ -n "$NS" ]; then
+        ck "resolv.conf 存在" "nameserver" "$NS"
+    else
+        echo "SKIP  resolv.conf 无 nameserver 行（容器镜像默认如此）"
+        skip=$((skip+1))
+    fi
 else
     echo "SKIP  resolv.conf 不存在（App 环境会写入）"
     skip=$((skip+1))

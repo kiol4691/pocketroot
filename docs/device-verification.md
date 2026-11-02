@@ -670,6 +670,52 @@ fork 后在新进程里做的，父进程的缓存只在它自己 exec 前存在
 到共享内存），属结构性改动，暂不做。
 
 
+## Debian 13 轻量 rootfs 在 App 进程内（2026-11-02）
+
+基线从 Ubuntu / Alpaquita 换成 **Debian 13 (trixie)**：Debian 的商标政策允许「基于 Debian」
+的表述，而它的落地痕迹（keyring、terminfo、perl 命名空间）全是功能件，删了系统就坏。
+于是身份处理改用 **mark 模式** —— 保留名称，只明确告知是修改版。
+
+构建链路（全部在宿主机完成，不需要执行任何 arm64 代码）：
+
+```
+python:3.13-slim (Debian 13 + glibc 2.41 + Python 3.13 + pip)
+  + tools/add-debs.py  --profile light        （git/vim/curl/jq/procps/libgomp1 …）
+  + tools/add-wheels.py numpy,requests,openpyxl,python-docx
+  + tools/slim-rootfs.py                      （删 man/info/perl POD/python test/locale）
+  + tools/rootfs-identity.py --mode=mark      （标注修改版）
+  → tar → build.sh --glibc
+```
+
+体积：解包 **343 MB**，APK **98 MB**。
+
+### 结果（App 进程内，zygote seccomp 开着）
+
+```
+PASS=32  FAIL=0  SKIP=2        （SKIP = torch 未装、静态二进制项）
+
+Linux localhost 5.15.104-android13 aarch64
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"   VARIANT_ID=pocketroot
+Python 3.13.18
+imports ok   numpy 2.5.4   requests 2.34.2   （openpyxl / python-docx 同一行导入）
+libgomp ok   （ctypes.CDLL 直接加载，PyTorch 的 OpenMP 依赖）
+git 2.47.3 / ps / jq 1.7 / curl 8.14.1
+```
+
+### 两条断言与发行版相关，已改
+
+| 断言 | 原写法 | Debian 上的问题 | 改法 |
+|---|---|---|---|
+| `ls 深层目录` | `ls /etc \| grep -c passwd` | 多了 `passwd-`（备份文件），数到 2 | 改成 `grep -c '^passwd$'` |
+| `resolv.conf 存在` | `cat /etc/resolv.conf \| head -1` | 容器镜像首行是注释（真正的 nameserver 在下面） | 找第一条 `^nameserver`，没有则 SKIP |
+
+### 一个手动验证才会踩的坑
+
+用 `run-as` + `tar` 解包到 app 私有目录时，**硬链接会失败**（`Permission denied`），
+于是 `unzip`、`perl` 这类「一个 inode 两个名字」的文件只剩一个入口。手动解包时加
+`--hard-dereference`（把硬链接展开成副本）即可。正常安装路径不受影响：
+`TarExtractor` 支持 tar 的 typeflag `1`（硬链接）。
+
 ## 尚未验证
 
 > 前两版这里写着"PyTorch / rseq 未实测""线程密集负载未压测"—— 均已完成，
@@ -677,8 +723,11 @@ fork 后在新进程里做的，父进程的缓存只在它自己 exec 前存在
 
 - 16KB 页设备（Pixel 16K 开发者模式）；
 - arm64 syscall 号表的自动校验（`_Static_assert` 只在 x86_64 跑）；
-- 换 glibc 版本（2.39 / 2.43 之外）时，补丁 EXPECT 命中数需重新确认 ——
+- 换 glibc 版本时补丁 EXPECT 命中数需重新确认（**2.39 / 2.41 / 2.43 三版已确认一致**）——
   脚本会硬失败，这是设计意图；
+- Debian 上只验证了轻量集合（numpy / requests / openpyxl / python-docx）；
+  scipy / pandas / matplotlib 是在 Ubuntu + cp312 上验的，Debian + cp313 未跑；
+- torch 未在 Debian 13 上装过（需 cp313 轮子，与之前 cp312 的那套不通用）；
 - 长跑（小时级）稳定性；线程压测最长只跑到 12800 次建销线程；
 - 只在 CPU 上验证过：GPU / NNAPI 无路径，完整训练任务未跑；
 - `set_robust_list` 被伪装成成功后，健壮互斥量的崩溃恢复**不可用**（已知降级，
